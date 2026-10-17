@@ -1,0 +1,101 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ==========================================
+    // HELPER FUNCTIONS
+    // ==========================================
+
+    // Check if the user is authenticated
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Check if the authenticated user has a verified VIT student email
+    function isVitStudent() {
+      return isSignedIn() &&
+        request.auth.token.email.matches('.*@vitstudent\\.ac\\.in$');
+    }
+
+    // Check if request originates from specified user ID
+    function isUser(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Retrieve the ownerId of an item document
+    function getItemOwner(itemId) {
+      return get(/databases/$(database)/documents/items/$(itemId)).data.ownerId;
+    }
+
+    // ==========================================
+    // ITEMS COLLECTION
+    // ==========================================
+    match /items/{itemId} {
+      // Anyone authenticated in VIT can view public item cards
+      allow read: if isSignedIn();
+
+      // Only authenticated VIT students can create items, setting themselves as owner
+      allow create: if isVitStudent() &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.keys().hasAll(['type', 'title', 'category', 'status', 'ownerId', 'createdAt']);
+
+      // Users can ONLY edit their own items, cannot reassign ownerId
+      allow update: if isVitStudent() &&
+        resource.data.ownerId == request.auth.uid &&
+        request.resource.data.ownerId == resource.data.ownerId;
+
+      // Users can ONLY delete their own items
+      allow delete: if isVitStudent() &&
+        resource.data.ownerId == request.auth.uid;
+
+      // Private verification subcollection:
+      // Holds the raw hiddenDetail / secret answers.
+      // CANNOT be read or written by anyone EXCEPT the item's poster!
+      match /private/{secretDoc} {
+        allow read, write: if isVitStudent() &&
+          request.auth.uid == getItemOwner(itemId);
+      }
+    }
+
+    // ==========================================
+    // CLAIMS COLLECTION
+    // ==========================================
+    match /claims/{claimId} {
+      // Submitting a claim:
+      // Must be an authenticated VIT student and can only file as themselves
+      allow create: if isVitStudent() &&
+        request.resource.data.claimerId == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.keys().hasAll(['itemId', 'claimerId', 'claimerEmail', 'claimerName', 'answers', 'status', 'createdAt']);
+
+      // Reading a claim (protecting claimer contact info & verification answers):
+      // CANNOT be read unless the user is the CLAIMER or the ITEM'S POSTER!
+      allow read: if isSignedIn() && (
+        request.auth.uid == resource.data.claimerId ||
+        request.auth.uid == getItemOwner(resource.data.itemId)
+      );
+
+      // Updating a claim:
+      // Only the item's poster can approve or reject the claim
+      // Or claimer can withdraw/edit while pending
+      allow update: if isVitStudent() && (
+        request.auth.uid == getItemOwner(resource.data.itemId) ||
+        (request.auth.uid == resource.data.claimerId && resource.data.status == 'pending')
+      );
+
+      // Deleting a claim
+      allow delete: if isVitStudent() && (
+        request.auth.uid == resource.data.claimerId ||
+        request.auth.uid == getItemOwner(resource.data.itemId)
+      );
+    }
+
+    // ==========================================
+    // USERS COLLECTION
+    // ==========================================
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isUser(userId);
+    }
+  }
+}
